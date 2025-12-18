@@ -175,7 +175,7 @@ async def _run_tests_and_evaluate(
     return out
 
 
-class SweBenchEnv(base.CodeBaseEnv[SwebenchTask]):
+class SweBenchEnv(base.BaseEnv[SwebenchTask]):
     def __init__(
         self,
         # TODO: Decide if we want to include the task sampling logic in the base class
