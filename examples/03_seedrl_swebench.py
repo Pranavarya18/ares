@@ -19,12 +19,8 @@ Example usage:
 import asyncio
 import dataclasses
 import time
-import uuid
 from typing import Any
 
-import openai.types.chat.chat_completion
-import openai.types.chat.chat_completion_message
-import openai.types.completion_usage
 import torch
 import torch.nn as nn
 import transformers
@@ -304,7 +300,7 @@ class Learner:
 
             # Print value head output shape once for demonstration
             if self.total_requests == 0:
-                print(f"[Learner] Value head output shapes:")
+                print("[Learner] Value head output shapes:")
                 print(f"  - logits: {value_output['logits'].shape}")
                 print(f"  - probs: {value_output['probs'].shape}")
                 print(f"  - value: {value_output['value'].shape}")
@@ -320,38 +316,22 @@ class Learner:
 
         self.total_tokens_generated += num_output_tokens
 
-        # Wrap in OpenAI-compatible response
-        response = llm_clients.LLMResponse(
-            chat_completion_response=openai.types.chat.chat_completion.ChatCompletion(
-                id=str(uuid.uuid4()),
-                choices=[
-                    openai.types.chat.chat_completion.Choice(
-                        message=openai.types.chat.chat_completion_message.ChatCompletionMessage(
-                            content=output_text,
-                            role="assistant",
-                        ),
-                        finish_reason="stop",
-                        index=0,
-                    )
-                ],
-                created=int(time.time()),
-                model=self.model_name,
-                object="chat.completion",
-                usage=openai.types.completion_usage.CompletionUsage(
-                    prompt_tokens=num_input_tokens,
-                    completion_tokens=num_output_tokens,
-                    total_tokens=num_input_tokens + num_output_tokens,
-                ),
-            ),
-            cost=0.0,
+        # Build OpenAI-compatible response using helper
+        return llm_clients.build_openai_compatible_llm_response(
+            output_text=output_text,
+            num_input_tokens=num_input_tokens,
+            num_output_tokens=num_output_tokens,
+            model=self.model_name,
         )
-
-        return response
 
     def _run_batched_inference(
         self, batch: list[InferenceRequest]
     ) -> list[llm_clients.LLMResponse]:
         """Run inference on a batch of requests with proper padding (blocking call, runs in thread pool).
+
+        This method groups requests by their generation parameters (temperature, do_sample) and
+        processes each group separately to ensure generation parameters are respected per request.
+        The original order of responses is preserved.
 
         Args:
             batch: List of InferenceRequests to process together
@@ -363,6 +343,55 @@ class Learner:
 
         if batch_size == 1:
             # Fall back to single inference for batch size 1
+            return [self._run_inference(batch[0])]
+
+        # Group requests by generation parameters to ensure compatibility
+        # Key: (temperature, do_sample)
+        param_groups: dict[tuple[float, bool], list[tuple[int, InferenceRequest]]] = {}
+        for idx, req in enumerate(batch):
+            temp = req.request.temperature or 1.0
+            do_sample = True if req.request.temperature else False
+            key = (temp, do_sample)
+            if key not in param_groups:
+                param_groups[key] = []
+            param_groups[key].append((idx, req))
+
+        # If all requests have the same parameters, process as one batch
+        if len(param_groups) == 1:
+            return self._run_single_param_batch(batch)
+
+        # Otherwise, process each parameter group separately and reassemble in original order
+        all_responses: list[tuple[int, llm_clients.LLMResponse]] = []
+        for param_key, group in param_groups.items():
+            # Extract just the requests (without indices) for processing
+            group_requests = [req for _, req in group]
+            group_responses = self._run_single_param_batch(group_requests)
+
+            # Pair responses with their original indices
+            for (orig_idx, _), response in zip(group, group_responses):
+                all_responses.append((orig_idx, response))
+
+        # Sort by original index and return responses in original order
+        all_responses.sort(key=lambda x: x[0])
+        return [response for _, response in all_responses]
+
+    def _run_single_param_batch(
+        self, batch: list[InferenceRequest]
+    ) -> list[llm_clients.LLMResponse]:
+        """Run inference on a batch of requests with the same generation parameters.
+
+        This is the core batched inference implementation that assumes all requests
+        in the batch have identical generation parameters.
+
+        Args:
+            batch: List of InferenceRequests with matching generation parameters
+
+        Returns:
+            List of LLMResponses, one per request in the same order
+        """
+        batch_size = len(batch)
+
+        if batch_size == 1:
             return [self._run_inference(batch[0])]
 
         # Tokenize all requests separately first
@@ -461,30 +490,12 @@ class Learner:
 
             self.total_tokens_generated += num_output_tokens
 
-            # Wrap in OpenAI-compatible response
-            response = llm_clients.LLMResponse(
-                chat_completion_response=openai.types.chat.chat_completion.ChatCompletion(
-                    id=str(uuid.uuid4()),
-                    choices=[
-                        openai.types.chat.chat_completion.Choice(
-                            message=openai.types.chat.chat_completion_message.ChatCompletionMessage(
-                                content=output_text,
-                                role="assistant",
-                            ),
-                            finish_reason="stop",
-                            index=0,
-                        )
-                    ],
-                    created=int(time.time()),
-                    model=self.model_name,
-                    object="chat.completion",
-                    usage=openai.types.completion_usage.CompletionUsage(
-                        prompt_tokens=num_input_tokens,
-                        completion_tokens=num_output_tokens,
-                        total_tokens=num_input_tokens + num_output_tokens,
-                    ),
-                ),
-                cost=0.0,
+            # Build OpenAI-compatible response using helper
+            response = llm_clients.build_openai_compatible_llm_response(
+                output_text=output_text,
+                num_input_tokens=num_input_tokens,
+                num_output_tokens=num_output_tokens,
+                model=self.model_name,
             )
             responses.append(response)
 
