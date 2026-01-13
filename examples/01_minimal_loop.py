@@ -19,7 +19,8 @@ from ares.llms import llm_clients
 
 async def main():
     # Create an LLM client using the ChatCompletionCompatibleLLMClient
-    agent = chat_completions_compatible.ChatCompletionCompatibleLLMClient(model="openai/gpt-5-mini")
+    # Users can choose different models (e.g., "openai/gpt-4o-mini", "anthropic/claude-3-5-sonnet-20241022")
+    agent = chat_completions_compatible.ChatCompletionCompatibleLLMClient(model="openai/gpt-4o-mini")
 
     # Load all SWE-bench verified tasks
     all_tasks = swebench_env.swebench_verified_tasks()
