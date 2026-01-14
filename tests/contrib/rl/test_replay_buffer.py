@@ -102,11 +102,11 @@ class TestEpisodeLifecycle:
         await buffer.append_observation_action_reward(episode_id, observation=[1], action=0, reward=1.0)
 
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[2]
+            episode_id, status="COMPLETED", final_observation=[2]
         )
 
         stats = await buffer.get_stats()
-        assert stats["terminal"] == 1
+        assert stats["completed"] == 1
         assert stats["in_progress"] == 0
 
     @pytest.mark.asyncio
@@ -118,11 +118,11 @@ class TestEpisodeLifecycle:
         await buffer.append_observation_action_reward(episode_id, observation=[1], action=0, reward=1.0)
 
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TRUNCATED, final_observation=[2]
+            episode_id, status="COMPLETED", final_observation=[2]
         )
 
         stats = await buffer.get_stats()
-        assert stats["truncated"] == 1
+        assert stats["completed"] == 1
         assert stats["in_progress"] == 0
 
     @pytest.mark.asyncio
@@ -134,7 +134,7 @@ class TestEpisodeLifecycle:
         await buffer.append_observation_action_reward(episode_id, observation=[1], action=0, reward=1.0)
 
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[2]
+            episode_id, status="COMPLETED", final_observation=[2]
         )
 
         # Try to append after ending
@@ -150,12 +150,12 @@ class TestEpisodeLifecycle:
         await buffer.append_observation_action_reward(episode_id, observation=[1], action=0, reward=1.0)
 
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[2]
+            episode_id, status="COMPLETED", final_observation=[2]
         )
 
         with pytest.raises(ValueError, match="already finished"):
             await buffer.end_episode(
-                episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[3]
+                episode_id, status="COMPLETED", final_observation=[3]
             )
 
     @pytest.mark.asyncio
@@ -165,7 +165,7 @@ class TestEpisodeLifecycle:
         episode_id = await buffer.start_episode(agent_id="agent_0")
 
         with pytest.raises(ValueError, match="Cannot end episode with status IN_PROGRESS"):
-            await buffer.end_episode(episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.IN_PROGRESS)
+            await buffer.end_episode(episode_id, status="IN_PROGRESS")
 
 
 class TestStorageFormat:
@@ -186,7 +186,7 @@ class TestStorageFormat:
         await buffer.append_observation_action_reward(episode_id, observation=obs_1, action=1, reward=2.0)
 
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=obs_2
+            episode_id, status="COMPLETED", final_observation=obs_2
         )
 
         # Sample and verify next_obs matches subsequent observation
@@ -217,7 +217,7 @@ class TestConcurrency:
             for t in range(num_steps):
                 await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=float(t))
             await buffer.end_episode(
-                episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[num_steps]
+                episode_id, status="COMPLETED", final_observation=[num_steps]
             )
 
         # Run multiple episodes concurrently
@@ -231,7 +231,7 @@ class TestConcurrency:
         stats = await buffer.get_stats()
         assert stats["total_episodes"] == 3
         assert stats["total_steps"] == 10 + 20 + 15
-        assert stats["terminal"] == 3
+        assert stats["completed"] == 3
 
     @pytest.mark.asyncio
     async def test_concurrent_writes_and_reads(self):
@@ -244,7 +244,7 @@ class TestConcurrency:
             for t in range(10):
                 await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=1.0)
             await buffer.end_episode(
-                episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[10]
+                episode_id, status="COMPLETED", final_observation=[10]
             )
 
         async def writer():
@@ -254,7 +254,7 @@ class TestConcurrency:
                 for t in range(5):
                     await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=1.0)
                 await buffer.end_episode(
-                    episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+                    episode_id, status="COMPLETED", final_observation=[5]
                 )
                 await asyncio.sleep(0.001)  # Small delay to allow interleaving
 
@@ -290,7 +290,7 @@ class TestUniformSampling:
         for t in range(10):
             await buffer.append_observation_action_reward(ep1, observation={"ep": 1, "t": t}, action=t, reward=1.0)
         await buffer.end_episode(
-            ep1, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation={"ep": 1, "t": 10}
+            ep1, status="COMPLETED", final_observation={"ep": 1, "t": 10}
         )
 
         # Episode 2: 30 steps (3x longer)
@@ -298,7 +298,7 @@ class TestUniformSampling:
         for t in range(30):
             await buffer.append_observation_action_reward(ep2, observation={"ep": 2, "t": t}, action=t, reward=1.0)
         await buffer.end_episode(
-            ep2, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation={"ep": 2, "t": 30}
+            ep2, status="COMPLETED", final_observation={"ep": 2, "t": 30}
         )
 
         # Sample many times and count samples from each episode
@@ -326,7 +326,7 @@ class TestUniformSampling:
             for t in range(10):
                 await buffer.append_observation_action_reward(ep, observation=[i, t], action=t, reward=1.0)
             await buffer.end_episode(
-                ep, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[i, 10]
+                ep, status="COMPLETED", final_observation=[i, 10]
             )
 
         # Sample exhaustively (all 30 steps)
@@ -355,7 +355,7 @@ class TestNStepSampling:
         for t in range(5):
             await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=float(t + 1))
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+            episode_id, status="COMPLETED", final_observation=[5]
         )
 
         # Sample with n=3 starting from t=0
@@ -380,7 +380,7 @@ class TestNStepSampling:
         for t in range(3):
             await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=float(t + 1))
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[3]
+            episode_id, status="COMPLETED", final_observation=[3]
         )
 
         # Request n=5 but only 3 steps available from t=0
@@ -404,14 +404,14 @@ class TestNStepSampling:
         for t in range(3):
             await buffer.append_observation_action_reward(ep1, observation={"ep": 1, "t": t}, action=t, reward=1.0)
         await buffer.end_episode(
-            ep1, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation={"ep": 1, "t": 3}
+            ep1, status="COMPLETED", final_observation={"ep": 1, "t": 3}
         )
 
         ep2 = await buffer.start_episode(agent_id="agent_1")
         for t in range(3):
             await buffer.append_observation_action_reward(ep2, observation={"ep": 2, "t": t}, action=t, reward=2.0)
         await buffer.end_episode(
-            ep2, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation={"ep": 2, "t": 3}
+            ep2, status="COMPLETED", final_observation={"ep": 2, "t": 3}
         )
 
         # Sample with large n
@@ -441,7 +441,7 @@ class TestNStepSampling:
         for t in range(5):
             await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=float(t + 1))
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+            episode_id, status="COMPLETED", final_observation=[5]
         )
 
         # Sample starting from t=3 with n=3
@@ -463,7 +463,7 @@ class TestNStepSampling:
         for t in range(5):
             await buffer.append_observation_action_reward(episode_id, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            episode_id, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+            episode_id, status="COMPLETED", final_observation=[5]
         )
 
         gamma = 0.9
@@ -475,41 +475,35 @@ class TestNStepSampling:
 
     @pytest.mark.asyncio
     async def test_n_step_terminal_vs_truncated(self):
-        """Test that terminal and truncated flags are set correctly."""
+        """Test that terminal flag is set correctly for completed episodes."""
         buffer = ares.contrib.rl.replay_buffer.EpisodeReplayBuffer()
 
-        # Terminal episode
+        # Completed episode 1
         ep1 = await buffer.start_episode(agent_id="agent_0")
         for t in range(3):
             await buffer.append_observation_action_reward(ep1, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep1, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[3]
+            ep1, status="COMPLETED", final_observation=[3]
         )
 
-        # Truncated episode
+        # Completed episode 2
         ep2 = await buffer.start_episode(agent_id="agent_1")
         for t in range(3):
             await buffer.append_observation_action_reward(ep2, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep2, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TRUNCATED, final_observation=[3]
+            ep2, status="COMPLETED", final_observation=[3]
         )
 
         # Sample with n that includes the end
         samples = await buffer.sample_n_step(batch_size=10, n=5, gamma=0.9)
 
-        # Find sample from terminal episode starting at end
-        terminal_samples = [s for s in samples if s.episode_id == ep1 and s.start_step == 2]
-        if terminal_samples:
-            assert terminal_samples[0].done
-            assert terminal_samples[0].terminal
-            assert not terminal_samples[0].truncated
-
-        # Find sample from truncated episode
-        truncated_samples = [s for s in samples if s.episode_id == ep2 and s.start_step == 2]
-        if truncated_samples:
-            assert truncated_samples[0].done
-            assert truncated_samples[0].truncated
-            assert not truncated_samples[0].terminal
+        # Find samples from completed episodes starting at end
+        # With new status system, all completed episodes are terminal, truncated is always False
+        completed_samples = [s for s in samples if s.start_step == 2]
+        for sample in completed_samples:
+            assert sample.done
+            assert sample.terminal
+            assert not sample.truncated
 
 
 class TestCapacityAndEviction:
@@ -525,7 +519,7 @@ class TestCapacityAndEviction:
             ep = await buffer.start_episode(agent_id=f"agent_{i}")
             await buffer.append_observation_action_reward(ep, observation=[i], action=i, reward=1.0)
             await buffer.end_episode(
-                ep, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[i + 1]
+                ep, status="COMPLETED", final_observation=[i + 1]
             )
 
         stats = await buffer.get_stats()
@@ -535,7 +529,7 @@ class TestCapacityAndEviction:
         ep4 = await buffer.start_episode(agent_id="agent_3")
         await buffer.append_observation_action_reward(ep4, observation=[3], action=3, reward=1.0)
         await buffer.end_episode(
-            ep4, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[4]
+            ep4, status="COMPLETED", final_observation=[4]
         )
 
         stats = await buffer.get_stats()
@@ -551,14 +545,14 @@ class TestCapacityAndEviction:
         for t in range(5):
             await buffer.append_observation_action_reward(ep1, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep1, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+            ep1, status="COMPLETED", final_observation=[5]
         )
 
         ep2 = await buffer.start_episode(agent_id="agent_1")
         for t in range(5):
             await buffer.append_observation_action_reward(ep2, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep2, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+            ep2, status="COMPLETED", final_observation=[5]
         )
 
         stats = await buffer.get_stats()
@@ -569,7 +563,7 @@ class TestCapacityAndEviction:
         for t in range(3):
             await buffer.append_observation_action_reward(ep3, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep3, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[3]
+            ep3, status="COMPLETED", final_observation=[3]
         )
 
         stats = await buffer.get_stats()
@@ -586,7 +580,7 @@ class TestCapacityAndEviction:
             ep = await buffer.start_episode(agent_id=f"agent_{i}")
             await buffer.append_observation_action_reward(ep, observation=[i], action=i, reward=1.0)
             await buffer.end_episode(
-                ep, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[i + 1]
+                ep, status="COMPLETED", final_observation=[i + 1]
             )
 
         # Add 1 in-progress episode
@@ -596,13 +590,13 @@ class TestCapacityAndEviction:
         stats = await buffer.get_stats()
         assert stats["total_episodes"] == 3
         assert stats["in_progress"] == 1
-        assert stats["terminal"] == 2
+        assert stats["completed"] == 2
 
         # Add another episode, should evict oldest finished, not in-progress
         ep_new = await buffer.start_episode(agent_id="agent_new")
         await buffer.append_observation_action_reward(ep_new, observation=[100], action=100, reward=1.0)
         await buffer.end_episode(
-            ep_new, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[101]
+            ep_new, status="COMPLETED", final_observation=[101]
         )
 
         stats = await buffer.get_stats()
@@ -619,14 +613,14 @@ class TestCapacityAndEviction:
         for t in range(10):
             await buffer.append_observation_action_reward(ep1, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep1, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[10]
+            ep1, status="COMPLETED", final_observation=[10]
         )
 
         ep2 = await buffer.start_episode(agent_id="agent_1")
         for t in range(5):
             await buffer.append_observation_action_reward(ep2, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep2, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[5]
+            ep2, status="COMPLETED", final_observation=[5]
         )
 
         stats = await buffer.get_stats()
@@ -637,7 +631,7 @@ class TestCapacityAndEviction:
         for t in range(7):
             await buffer.append_observation_action_reward(ep3, observation=[t], action=t, reward=1.0)
         await buffer.end_episode(
-            ep3, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[7]
+            ep3, status="COMPLETED", final_observation=[7]
         )
 
         stats = await buffer.get_stats()
@@ -694,7 +688,7 @@ class TestEdgeCases:
             ep = await buffer.start_episode(agent_id=f"agent_{i}")
             await buffer.append_observation_action_reward(ep, observation=[i], action=i, reward=1.0)
             await buffer.end_episode(
-                ep, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[i + 1]
+                ep, status="COMPLETED", final_observation=[i + 1]
             )
 
         stats = await buffer.get_stats()
@@ -715,7 +709,7 @@ class TestEdgeCases:
         ep = await buffer.start_episode(agent_id="agent_0")
         for t in range(3):
             await buffer.append_observation_action_reward(ep, observation=[t], action=t, reward=1.0)
-        await buffer.end_episode(ep, status=ares.contrib.rl.replay_buffer.EpisodeStatus.TERMINAL, final_observation=[3])
+        await buffer.end_episode(ep, status="COMPLETED", final_observation=[3])
 
         # Request 100 samples but only 3 available
         samples = await buffer.sample_n_step(batch_size=100, n=1, gamma=0.9)

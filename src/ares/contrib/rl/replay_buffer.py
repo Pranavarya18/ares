@@ -46,8 +46,8 @@ Usage Example:
         episode_id, obs_1, action_1, reward_1
     )
 
-    # End episode (either terminal or truncated)
-    await buffer.end_episode(episode_id, status=EpisodeStatus.TERMINAL)
+    # End episode
+    await buffer.end_episode(episode_id, status="COMPLETED")
 
     # Sample n-step batches
     samples = await buffer.sample_n_step(batch_size=32, n=3, gamma=0.99)
@@ -72,22 +72,20 @@ Thread Safety and Async Usage:
 import asyncio
 import collections
 import dataclasses
-import enum
 import random
 import time
-from typing import Any
+from typing import Any, Literal, TypeVar
 import uuid
 
+# Type of episode status
+EpisodeStatus = Literal["IN_PROGRESS", "COMPLETED"]
 
-class EpisodeStatus(enum.Enum):
-    """Status of an episode in the replay buffer."""
-
-    IN_PROGRESS = "in_progress"
-    TERMINAL = "terminal"  # Episode ended naturally (e.g., goal reached, death)
-    TRUNCATED = "truncated"  # Episode ended due to time limit or external constraint
+# Generic types for observations and actions
+ObservationType = TypeVar("ObservationType")
+ActionType = TypeVar("ActionType")
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class Episode:
     """An episode containing sequences of observations, actions, and rewards.
 
@@ -115,7 +113,7 @@ class Episode:
     observations: list[Any] = dataclasses.field(default_factory=list)
     actions: list[Any] = dataclasses.field(default_factory=list)
     rewards: list[float] = dataclasses.field(default_factory=list)
-    status: EpisodeStatus = EpisodeStatus.IN_PROGRESS
+    status: EpisodeStatus = "IN_PROGRESS"
     start_time: float = dataclasses.field(default_factory=time.time)
 
     def __len__(self) -> int:
@@ -123,8 +121,8 @@ class Episode:
         return len(self.actions)
 
 
-@dataclasses.dataclass
-class NStepSample:
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ReplaySample[ObservationType, ActionType]:
     """A sampled n-step experience for training.
 
     The sample captures a trajectory segment starting at time t:
@@ -150,10 +148,10 @@ class NStepSample:
 
     episode_id: str
     agent_id: str
-    obs_t: Any
-    action_t: Any
+    obs_t: ObservationType
+    action_t: ActionType
     rewards_seq: list[float]
-    next_obs: Any
+    next_obs: ObservationType
     done: bool
     truncated: bool
     terminal: bool
@@ -161,6 +159,22 @@ class NStepSample:
     start_step: int
     actual_n: int
     gamma: float
+
+    @property
+    def reward(self) -> float:
+        """Return the computed discounted return for this sample.
+
+        This is a convenience property that computes the discounted return
+        from the rewards sequence using the stored gamma value.
+
+        Returns:
+            The discounted return: sum_{k=0}^{n-1} gamma^k * r_k
+        """
+        return compute_discounted_return(self.rewards_seq, self.gamma)
+
+
+# Backward compatibility alias
+NStepSample = ReplaySample
 
 
 def compute_discounted_return(rewards: list[float], gamma: float) -> float:
@@ -299,7 +313,7 @@ class EpisodeReplayBuffer:
 
             episode = self._episodes[episode_id]
 
-            if episode.status != EpisodeStatus.IN_PROGRESS:
+            if episode.status != "IN_PROGRESS":
                 raise ValueError(f"Cannot append to finished episode {episode_id} (status: {episode.status})")
 
             # Store observation (if this is the first call, obs_0)
@@ -318,20 +332,21 @@ class EpisodeReplayBuffer:
     async def end_episode(
         self,
         episode_id: str,
-        status: EpisodeStatus,
+        status: EpisodeStatus = "COMPLETED",
         final_observation: Any | None = None,
     ) -> None:
         """Mark an episode as finished.
 
         Args:
             episode_id: The episode to end
-            status: EpisodeStatus.TERMINAL or EpisodeStatus.TRUNCATED
+            status: Episode status (should be "COMPLETED")
             final_observation: Optional final observation obs_T after last action.
                              If provided, appended to observations list.
 
         Raises:
             ValueError: If episode doesn't exist, is already finished, or
-                       status is IN_PROGRESS
+                       status is IN_PROGRESS, or if final_observation is required
+                       but not provided
         """
         async with self._lock:
             if episode_id not in self._episodes:
@@ -339,25 +354,36 @@ class EpisodeReplayBuffer:
 
             episode = self._episodes[episode_id]
 
-            if episode.status != EpisodeStatus.IN_PROGRESS:
+            if episode.status != "IN_PROGRESS":
                 raise ValueError(f"Episode {episode_id} is already finished")
 
-            if status == EpisodeStatus.IN_PROGRESS:
-                raise ValueError("Cannot end episode with status IN_PROGRESS. Use TERMINAL or TRUNCATED.")
+            if status == "IN_PROGRESS":
+                raise ValueError("Cannot end episode with status IN_PROGRESS")
 
-            episode.status = status
-
-            # Store final observation if provided and needed
-            # observations should be len(actions) + 1
-            if final_observation is not None and len(episode.observations) == len(episode.actions):
+            # Validation: If observations length equals actions length,
+            # the final observation hasn't been added yet, so it must be provided
+            if len(episode.observations) == len(episode.actions):
+                if final_observation is None:
+                    raise ValueError(
+                        f"Episode {episode_id} requires final_observation: "
+                        f"observations length ({len(episode.observations)}) equals "
+                        f"actions length ({len(episode.actions)})"
+                    )
                 episode.observations.append(final_observation)
+            elif final_observation is not None:
+                # If final_observation is provided but not needed, append it anyway
+                episode.observations.append(final_observation)
+
+            # Update status using object.__setattr__ since dataclass is frozen would prevent direct assignment
+            # Actually, Episode is NOT frozen, so we can directly assign
+            object.__setattr__(episode, "status", status)
 
     async def sample_n_step(
         self,
         batch_size: int,
         n: int,
         gamma: float,
-    ) -> list[NStepSample]:
+    ) -> list[ReplaySample]:
         """Sample n-step experiences uniformly from the buffer.
 
         Sampling is uniform over all valid time steps across all episodes.
@@ -388,6 +414,8 @@ class EpisodeReplayBuffer:
             #   - episode has at least t+1 observations (obs_t exists)
             #   - episode has action_t and reward_t
             #   - t < len(actions)
+            #   - For IN_PROGRESS episodes: must have next observation available
+            #     (i.e., len(observations) > t + 1)
             # TODO: For very large buffers, consider using a Fenwick tree
             # (Binary Indexed Tree) to maintain cumulative step counts per episode,
             # enabling O(log n) sampling instead of O(num_episodes) scan.
@@ -398,8 +426,15 @@ class EpisodeReplayBuffer:
                 if num_steps == 0:
                     continue
 
-                # Each step index t in [0, num_steps-1] is a valid start
+                # For each potential starting position t
                 for t in range(num_steps):
+                    # For IN_PROGRESS episodes, ensure next observation exists
+                    # The next observation could be at t+1 (for 1-step) or further
+                    # We need at least t+1 to exist as the immediate next observation
+                    if episode.status == "IN_PROGRESS" and len(episode.observations) <= t + 1:
+                        # Next observation not available yet for IN_PROGRESS episodes
+                        continue
+
                     valid_positions.append((episode_id, t))
 
             if not valid_positions:
@@ -410,7 +445,7 @@ class EpisodeReplayBuffer:
             sampled_positions = random.sample(valid_positions, num_samples)
 
             # Build n-step samples
-            samples: list[NStepSample] = []
+            samples: list[ReplaySample] = []
             for episode_id, start_idx in sampled_positions:
                 sample = self._build_n_step_sample(
                     episode_id=episode_id,
@@ -428,7 +463,7 @@ class EpisodeReplayBuffer:
         start_idx: int,
         n: int,
         gamma: float,
-    ) -> NStepSample:
+    ) -> ReplaySample:
         """Build an n-step sample starting from a given position.
 
         Never crosses episode boundary; truncates if fewer than n steps remain.
@@ -463,14 +498,15 @@ class EpisodeReplayBuffer:
                 next_obs = episode.observations[-1]
 
         # Check if episode ended within the window
-        done = (end_idx == num_steps) and (episode.status != EpisodeStatus.IN_PROGRESS)
-        terminal = done and (episode.status == EpisodeStatus.TERMINAL)
-        truncated = done and (episode.status == EpisodeStatus.TRUNCATED)
+        done = (end_idx == num_steps) and (episode.status != "IN_PROGRESS")
+        # With new status system, terminal and truncated are both "COMPLETED"
+        terminal = done  # All completed episodes are considered terminal in new system
+        truncated = False  # No separate truncated status in new system
 
         # Compute discount powers
         discount_powers = [gamma**k for k in range(actual_n)]
 
-        return NStepSample(
+        return ReplaySample(
             episode_id=episode_id,
             agent_id=episode.agent_id,
             obs_t=obs_t,
@@ -518,7 +554,7 @@ class EpisodeReplayBuffer:
         in_progress_episodes: list[tuple[str, Episode]] = []
 
         for episode_id, episode in self._episodes.items():
-            if episode.status == EpisodeStatus.IN_PROGRESS:
+            if episode.status == "IN_PROGRESS":
                 in_progress_episodes.append((episode_id, episode))
             else:
                 finished_episodes.append((episode_id, episode))
@@ -550,15 +586,13 @@ class EpisodeReplayBuffer:
             Dictionary with buffer statistics
         """
         async with self._lock:
-            num_in_progress = sum(1 for ep in self._episodes.values() if ep.status == EpisodeStatus.IN_PROGRESS)
-            num_terminal = sum(1 for ep in self._episodes.values() if ep.status == EpisodeStatus.TERMINAL)
-            num_truncated = sum(1 for ep in self._episodes.values() if ep.status == EpisodeStatus.TRUNCATED)
+            num_in_progress = sum(1 for ep in self._episodes.values() if ep.status == "IN_PROGRESS")
+            num_completed = sum(1 for ep in self._episodes.values() if ep.status == "COMPLETED")
 
             return {
                 "total_episodes": len(self._episodes),
                 "in_progress": num_in_progress,
-                "terminal": num_terminal,
-                "truncated": num_truncated,
+                "completed": num_completed,
                 "total_steps": self._total_steps,
                 "num_agents": len(self._agent_episodes),
             }
