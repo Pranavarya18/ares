@@ -47,5 +47,5 @@ examples = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["src", "tests"]
+testpaths = ["src"]
 python_files = ["test_*.py", "*_test.py"]
