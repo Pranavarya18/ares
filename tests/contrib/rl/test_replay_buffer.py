@@ -42,30 +42,16 @@ class TestEpisodeLifecycle:
     @pytest.mark.asyncio
     async def test_start_episode(self):
         """Test starting a new episode."""
+        import uuid
+
         buffer = ares.contrib.rl.replay_buffer.EpisodeReplayBuffer()
         episode_id = await buffer.start_episode(agent_id="agent_0")
 
-        assert episode_id.startswith("agent_0_")
+        # Verify episode_id is a valid UUID
+        uuid.UUID(episode_id)
         stats = await buffer.get_stats()
         assert stats["total_episodes"] == 1
         assert stats["in_progress"] == 1
-
-    @pytest.mark.asyncio
-    async def test_start_episode_custom_id(self):
-        """Test starting an episode with a custom ID."""
-        buffer = ares.contrib.rl.replay_buffer.EpisodeReplayBuffer()
-        episode_id = await buffer.start_episode(agent_id="agent_0", episode_id="custom_episode")
-
-        assert episode_id == "custom_episode"
-
-    @pytest.mark.asyncio
-    async def test_start_duplicate_episode_id(self):
-        """Test that starting an episode with duplicate ID raises error."""
-        buffer = ares.contrib.rl.replay_buffer.EpisodeReplayBuffer()
-        await buffer.start_episode(agent_id="agent_0", episode_id="ep1")
-
-        with pytest.raises(ValueError, match="already exists"):
-            await buffer.start_episode(agent_id="agent_0", episode_id="ep1")
 
     @pytest.mark.asyncio
     async def test_append_observation_action_reward(self):

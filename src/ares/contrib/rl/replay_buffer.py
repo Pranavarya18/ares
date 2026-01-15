@@ -22,7 +22,7 @@ Usage Example:
     # Create buffer with capacity limits
     buffer = EpisodeReplayBuffer(max_episodes=1000, max_steps=100000)
 
-    # Start an episode
+    # Start an episode (episode_id is auto-generated)
     episode_id = await buffer.start_episode(agent_id="agent_0")
 
     # Collect experience (initial observation before first action)
@@ -60,16 +60,12 @@ Usage Example:
     ```
 
 Thread Safety and Async Usage:
-    All public methods are async and use an internal asyncio.Lock to ensure
-    safe concurrent mutations. This buffer is designed for asyncio-only usage
-    and should NOT be used with threading.Thread. Multiple asyncio tasks can
-    safely write to the buffer concurrently.
-
-    Important: Do NOT mix asyncio with threading.Thread when using this buffer.
-    Use asyncio.create_task() or asyncio.gather() for concurrency.
+    All public methods are async. This buffer is designed for single-threaded
+    asyncio usage and does not provide internal synchronization. If you need
+    concurrent access from multiple asyncio tasks, you should manage
+    synchronization externally.
 """
 
-import asyncio
 import collections
 import dataclasses
 import random
@@ -189,7 +185,7 @@ def compute_discounted_return(rewards: list[float], gamma: float) -> float:
 
 
 class EpisodeReplayBuffer:
-    """Asyncio-safe replay buffer for episodic reinforcement learning.
+    """Replay buffer for episodic reinforcement learning.
 
     This buffer stores complete episodes and supports n-step sampling with
     proper handling of episode boundaries. It manages capacity by evicting
@@ -198,15 +194,14 @@ class EpisodeReplayBuffer:
     Sampling:
         Uniform sampling over all valid time steps (experiences) across episodes.
         Each valid step (obs_t, action_t, reward_t) has equal probability.
-        Current implementation uses O(num_episodes) scan; a TODO exists for
-        Fenwick tree optimization if needed for large buffers.
+        The implementation uses O(num_episodes) scan to build episode weights,
+        then O(num_episodes) weighted sampling for each sample, avoiding the
+        O(num_episodes * steps_per_episode) cost of enumerating all positions.
 
     Concurrency:
-        All public methods use an internal asyncio.Lock for thread-safety.
-        Safe for concurrent use by multiple asyncio tasks.
-
-        WARNING: This buffer is designed for asyncio ONLY. Do NOT use with
-        threading.Thread. Use asyncio.create_task() for concurrency.
+        This buffer is designed for single-threaded usage. If you need
+        concurrent access from multiple asyncio tasks, you should manage
+        synchronization externally.
 
     Capacity Management:
         - max_episodes: Maximum number of episodes to store
@@ -226,7 +221,6 @@ class EpisodeReplayBuffer:
             max_episodes: Maximum number of episodes to store (None = unlimited)
             max_steps: Maximum total transitions to store (None = unlimited)
         """
-        self._lock = asyncio.Lock()
         self._episodes: dict[str, Episode[Any, Any]] = {}
         self._max_episodes = max_episodes
         self._max_steps = max_steps
@@ -238,35 +232,25 @@ class EpisodeReplayBuffer:
     async def start_episode(
         self,
         agent_id: str,
-        episode_id: str | None = None,
     ) -> str:
         """Start a new episode.
 
         Args:
             agent_id: Identifier for the agent
-            episode_id: Optional custom episode ID (generated if None)
 
         Returns:
             The episode_id for this episode
-
-        Raises:
-            ValueError: If episode_id already exists
         """
-        async with self._lock:
-            if episode_id is None:
-                episode_id = f"{agent_id}_{uuid.uuid4().hex[:8]}"
+        episode_id = str(uuid.uuid4())
 
-            if episode_id in self._episodes:
-                raise ValueError(f"Episode {episode_id} already exists")
+        episode = Episode(episode_id=episode_id, agent_id=agent_id)
+        self._episodes[episode_id] = episode
+        self._agent_episodes[agent_id].append(episode_id)
 
-            episode = Episode(episode_id=episode_id, agent_id=agent_id)
-            self._episodes[episode_id] = episode
-            self._agent_episodes[agent_id].append(episode_id)
+        # Check capacity and evict if needed
+        await self._evict_if_needed()
 
-            # Check capacity and evict if needed
-            await self._evict_if_needed()
-
-            return episode_id
+        return episode_id
 
     async def append_observation_action_reward(
         self,
@@ -303,27 +287,26 @@ class EpisodeReplayBuffer:
         Raises:
             ValueError: If episode doesn't exist or is already finished
         """
-        async with self._lock:
-            if episode_id not in self._episodes:
-                raise ValueError(f"Episode {episode_id} not found")
+        if episode_id not in self._episodes:
+            raise ValueError(f"Episode {episode_id} not found")
 
-            episode = self._episodes[episode_id]
+        episode = self._episodes[episode_id]
 
-            if episode.status != "IN_PROGRESS":
-                raise ValueError(f"Cannot append to finished episode {episode_id} (status: {episode.status})")
+        if episode.status != "IN_PROGRESS":
+            raise ValueError(f"Cannot append to finished episode {episode_id} (status: {episode.status})")
 
-            # Store observation (if this is the first call, obs_0)
-            # For subsequent calls, we're storing obs_t where action_t was taken
-            if len(episode.observations) == len(episode.actions):
-                # We need to add the observation for this timestep
-                episode.observations.append(observation)
+        # Store observation (if this is the first call, obs_0)
+        # For subsequent calls, we're storing obs_t where action_t was taken
+        if len(episode.observations) == len(episode.actions):
+            # We need to add the observation for this timestep
+            episode.observations.append(observation)
 
-            episode.actions.append(action)
-            episode.rewards.append(reward)
-            self._total_steps += 1
+        episode.actions.append(action)
+        episode.rewards.append(reward)
+        self._total_steps += 1
 
-            # Check step capacity
-            await self._evict_if_needed()
+        # Check step capacity
+        await self._evict_if_needed()
 
     async def end_episode(
         self,
@@ -344,34 +327,57 @@ class EpisodeReplayBuffer:
                        status is IN_PROGRESS, or if final_observation is required
                        but not provided
         """
-        async with self._lock:
-            if episode_id not in self._episodes:
-                raise ValueError(f"Episode {episode_id} not found")
+        if episode_id not in self._episodes:
+            raise ValueError(f"Episode {episode_id} not found")
 
-            episode = self._episodes[episode_id]
+        episode = self._episodes[episode_id]
 
-            if episode.status != "IN_PROGRESS":
-                raise ValueError(f"Episode {episode_id} is already finished")
+        if episode.status != "IN_PROGRESS":
+            raise ValueError(f"Episode {episode_id} is already finished")
 
-            if status == "IN_PROGRESS":
-                raise ValueError("Cannot end episode with status IN_PROGRESS")
+        if status == "IN_PROGRESS":
+            raise ValueError("Cannot end episode with status IN_PROGRESS")
 
-            # Validation: If observations length equals actions length,
-            # the final observation hasn't been added yet, so it must be provided
-            if len(episode.observations) == len(episode.actions):
-                if final_observation is None:
-                    raise ValueError(
-                        f"Episode {episode_id} requires final_observation: "
-                        f"observations length ({len(episode.observations)}) equals "
-                        f"actions length ({len(episode.actions)})"
-                    )
-                episode.observations.append(final_observation)
-            elif final_observation is not None:
-                # If final_observation is provided but not needed, append it anyway
-                episode.observations.append(final_observation)
+        # Validation: If observations length equals actions length,
+        # the final observation hasn't been added yet, so it must be provided
+        if len(episode.observations) == len(episode.actions):
+            if final_observation is None:
+                raise ValueError(
+                    f"Episode {episode_id} requires final_observation: "
+                    f"observations length ({len(episode.observations)}) equals "
+                    f"actions length ({len(episode.actions)})"
+                )
+            episode.observations.append(final_observation)
+        elif final_observation is not None:
+            # If final_observation is provided but not needed, append it anyway
+            episode.observations.append(final_observation)
 
-            # Update status using object.__setattr__ since Episode dataclass is frozen
-            object.__setattr__(episode, "status", status)
+        # Update status using object.__setattr__ since Episode dataclass is frozen
+        object.__setattr__(episode, "status", status)
+
+    def _get_valid_step_count(self, episode: Episode) -> int:
+        """Get the number of valid starting positions for sampling in an episode.
+
+        Args:
+            episode: The episode to check
+
+        Returns:
+            Number of valid starting positions (0 if none)
+        """
+        num_steps = len(episode.actions)
+        if num_steps == 0:
+            return 0
+
+        # For COMPLETED episodes, all steps are valid
+        if episode.status == "COMPLETED":
+            return num_steps
+
+        # For IN_PROGRESS episodes, only steps with next observation available
+        # A step t is valid if observations[t+1] exists
+        # Since len(observations) can be at most len(actions) + 1,
+        # valid steps are those where t+1 < len(observations)
+        valid_count = max(0, len(episode.observations) - 1)
+        return min(valid_count, num_steps)
 
     async def sample_n_step(
         self,
@@ -403,54 +409,47 @@ class EpisodeReplayBuffer:
         if not 0 < gamma <= 1:
             raise ValueError(f"gamma must be in (0, 1], got {gamma}")
 
-        async with self._lock:
-            # Build a list of all valid starting positions
-            # A position (episode_id, t) is valid if:
-            #   - episode has at least t+1 observations (obs_t exists)
-            #   - episode has action_t and reward_t
-            #   - t < len(actions)
-            #   - For IN_PROGRESS episodes: must have next observation available
-            #     (i.e., len(observations) > t + 1)
-            # TODO: For very large buffers, consider using a Fenwick tree
-            # (Binary Indexed Tree) to maintain cumulative step counts per episode,
-            # enabling O(log n) sampling instead of O(num_episodes) scan.
-            valid_positions: list[tuple[str, int]] = []
+        # Build a mapping of cumulative position ranges to episodes
+        # This allows O(log num_episodes) binary search for position->episode mapping
+        episode_ranges: list[tuple[int, int, str]] = []  # (start_pos, end_pos, episode_id)
+        cumulative_pos = 0
 
-            for episode_id, episode in self._episodes.items():
-                num_steps = len(episode.actions)
-                if num_steps == 0:
-                    continue
+        for episode_id, episode in self._episodes.items():
+            valid_count = self._get_valid_step_count(episode)
+            if valid_count > 0:
+                episode_ranges.append((cumulative_pos, cumulative_pos + valid_count, episode_id))
+                cumulative_pos += valid_count
 
-                # For each potential starting position t
-                for t in range(num_steps):
-                    # For IN_PROGRESS episodes, ensure next observation exists
-                    # The next observation could be at t+1 (for 1-step) or further
-                    # We need at least t+1 to exist as the immediate next observation
-                    if episode.status == "IN_PROGRESS" and len(episode.observations) <= t + 1:
-                        # Next observation not available yet for IN_PROGRESS episodes
-                        continue
+        if not episode_ranges:
+            return []
 
-                    valid_positions.append((episode_id, t))
+        total_valid_positions = cumulative_pos
 
-            if not valid_positions:
-                return []
+        # Sample uniformly without replacement
+        num_samples = min(batch_size, total_valid_positions)
 
-            # Sample uniformly from valid positions
-            num_samples = min(batch_size, len(valid_positions))
-            sampled_positions = random.sample(valid_positions, num_samples)
+        # Generate unique random positions
+        sampled_global_positions = random.sample(range(total_valid_positions), num_samples)
 
-            # Build n-step samples
-            samples: list[ReplaySample] = []
-            for episode_id, start_idx in sampled_positions:
-                sample = self._build_n_step_sample(
-                    episode_id=episode_id,
-                    start_idx=start_idx,
-                    n=n,
-                    gamma=gamma,
-                )
-                samples.append(sample)
+        # Build n-step samples by mapping global positions back to (episode_id, step_idx)
+        samples: list[ReplaySample] = []
+        for global_pos in sampled_global_positions:
+            # Find the episode containing this position
+            for start_pos, end_pos, episode_id in episode_ranges:
+                if start_pos <= global_pos < end_pos:
+                    # Convert global position to local step index within episode
+                    start_idx = global_pos - start_pos
 
-            return samples
+                    sample = self._build_n_step_sample(
+                        episode_id=episode_id,
+                        start_idx=start_idx,
+                        n=n,
+                        gamma=gamma,
+                    )
+                    samples.append(sample)
+                    break
+
+        return samples
 
     def _build_n_step_sample(
         self,
@@ -569,21 +568,19 @@ class EpisodeReplayBuffer:
         Returns:
             Dictionary with buffer statistics
         """
-        async with self._lock:
-            num_in_progress = sum(1 for ep in self._episodes.values() if ep.status == "IN_PROGRESS")
-            num_completed = sum(1 for ep in self._episodes.values() if ep.status == "COMPLETED")
+        num_in_progress = sum(1 for ep in self._episodes.values() if ep.status == "IN_PROGRESS")
+        num_completed = sum(1 for ep in self._episodes.values() if ep.status == "COMPLETED")
 
-            return {
-                "total_episodes": len(self._episodes),
-                "in_progress": num_in_progress,
-                "completed": num_completed,
-                "total_steps": self._total_steps,
-                "num_agents": len(self._agent_episodes),
-            }
+        return {
+            "total_episodes": len(self._episodes),
+            "in_progress": num_in_progress,
+            "completed": num_completed,
+            "total_steps": self._total_steps,
+            "num_agents": len(self._agent_episodes),
+        }
 
     async def clear(self) -> None:
         """Clear all episodes from the buffer."""
-        async with self._lock:
-            self._episodes.clear()
-            self._agent_episodes.clear()
-            self._total_steps = 0
+        self._episodes.clear()
+        self._agent_episodes.clear()
+        self._total_steps = 0
