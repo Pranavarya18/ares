@@ -226,7 +226,7 @@ class EpisodeReplayBuffer:
         self._total_steps = 0
 
         # Track episodes by agent for potential future use
-        self._agent_episodes: dict[str, list[str]] = collections.defaultdict(list)
+        self._episodes_by_agent: dict[str, list[str]] = collections.defaultdict(list)
 
     async def start_episode(
         self,
@@ -244,7 +244,7 @@ class EpisodeReplayBuffer:
 
         episode = Episode(episode_id=episode_id, agent_id=agent_id)
         self._episodes[episode_id] = episode
-        self._agent_episodes[agent_id].append(episode_id)
+        self._episodes_by_agent[agent_id].append(episode_id)
 
         # Check capacity and evict if needed
         await self._evict_if_needed()
@@ -474,9 +474,9 @@ class EpisodeReplayBuffer:
         rewards_seq = episode.rewards[start_idx:end_idx]
 
         # next_obs is observation at end_idx
-        # If end_idx < len(observations), we have it
-        # Otherwise episode ended and we use the last observation
-        next_obs = episode.observations[end_idx] if end_idx < len(episode.observations) else episode.observations[-1]
+        # We can safely access this because _get_valid_step_count ensures
+        # that only positions with next_obs available are sampled
+        next_obs = episode.observations[end_idx]
 
         # Check if episode ended within the window
         terminal = (end_idx == num_steps) and (episode.status != "IN_PROGRESS")
@@ -554,10 +554,10 @@ class EpisodeReplayBuffer:
 
         # Update agent tracking
         agent_id = episode.agent_id
-        if agent_id in self._agent_episodes:
-            self._agent_episodes[agent_id].remove(episode_id)
-            if not self._agent_episodes[agent_id]:
-                del self._agent_episodes[agent_id]
+        if agent_id in self._episodes_by_agent:
+            self._episodes_by_agent[agent_id].remove(episode_id)
+            if not self._episodes_by_agent[agent_id]:
+                del self._episodes_by_agent[agent_id]
 
     async def get_stats(self) -> dict[str, Any]:
         """Get statistics about the replay buffer.
@@ -573,11 +573,11 @@ class EpisodeReplayBuffer:
             "in_progress": num_in_progress,
             "completed": num_completed,
             "total_steps": self._total_steps,
-            "num_agents": len(self._agent_episodes),
+            "num_agents": len(self._episodes_by_agent),
         }
 
     async def clear(self) -> None:
         """Clear all episodes from the buffer."""
         self._episodes.clear()
-        self._agent_episodes.clear()
+        self._episodes_by_agent.clear()
         self._total_steps = 0
