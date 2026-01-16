@@ -15,41 +15,69 @@ For now, we recommend running ARES locally from this directory:
 
 `uv sync --all-groups`
 
-and you're ready to get started.
-
-Alternatively, include it as a dependency in your own project's pyproject.toml using a relative path.
+and you're ready to get started.  
+Alternatively, include it as a dependency in your own project's pyproject.toml using a relative path.  
 PyPI installation will be coming soon.
+
+## Quick Start (No API Keys)
+
+You can quickly check if ARES is installed without setting up any API keys.
+
+```bash
+uv sync --all-groups
+python -c "import ares; print('ARES installed successfully')"
+```
+
+
 
 ## Configuration
 
 ARES requires API keys for various services. To get started:
 
-1. Copy the example environment file: `cp .env.example .env`
-2. Edit `.env` and fill in your API keys (see `.env.example` for required and optional variables)
+1. Copy the example environment file:  
+   ```bash
+   cp .env.example .env
 
-## Getting Started
+Edit .env and fill in your API keys (see .env.example for required and optional variables)
 
-ARES environments use an async version of the [dm_env](https://github.com/google-deepmind/dm_env) spec.
+## Full Setup (with API Keys)
+
+ARES environments use an async version of the [dm_env](https://github.com/google-deepmind/dm_env) spec.  
 Below is an example snippet of what this might look like in your code.
+
+### Daytona Setup
+
+By default, containers are run in Daytona:
+
+1. Create a Daytona account at [https://www.daytona.io](https://www.daytona.io)  
+2. Add your API key to `.env`:
 
 By default, containers are run in Daytona, so you will need to:
 
-1. Create a daytona account at [https://www.daytona.io](https://www.daytona.io/)
-1. Create a `.env` with `DAYTONA_API_KEY=...` and `DAYTONA_API_URL=...` set with an API key generated from your account.
+Create a daytona account at https://www.daytona.io
 
-This example also makes use of Martian for API inference. Similarly, you will need to
+Create a .env with DAYTONA_API_KEY=... and DAYTONA_API_URL=... set with an API key generated from your account.
 
-1. Create an account at [https://app.withmartian.com](https://app.withmartian.com)
-1. Add `CHAT_COMPLETION_API_KEY=...` to your `.env` with a Martian API key.
+
+### Martian Setup
+
+For API inference:
+
+1. Create an account at [https://app.withmartian.com](https://app.withmartian.com)  
+2. Add your API key to `.env`:
+This example also makes use of Martian for API inference. Similarly, you will need to:
+
+Create an account at https://app.withmartian.com
+
+Add CHAT_COMPLETION_API_KEY=... to your .env with a Martian API key.
 
 Then, you can run the following example:
 
-```
+```python
 import asyncio
 
 from ares.code_agents import llms
 from ares.environments import swebench_env
-
 
 async def main():
     agent = llms.ChatCompletionCompatibleLLMClient(model="openai/gpt-4.1-mini")
@@ -59,17 +87,10 @@ async def main():
     async with swebench_env.SweBenchEnv(tasks=tasks) as env:
         ts = await env.reset()
         while not ts.last():
-            # The agent takes the observation (LLM Request)
-            # and returns an action (LLM Response).
             print(f"Observation: {ts.observation}")
             action = await agent(ts.observation)
-
-            # The environment takes the action (LLM Response)
-            # and returns the next LLM request, reward, and discount.
             print(f"Action: {action}")
             ts = await env.step(action)
 
-
 if __name__ == "__main__":
     asyncio.run(main())
-```
