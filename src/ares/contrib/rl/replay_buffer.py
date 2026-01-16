@@ -233,6 +233,11 @@ class EpisodeReplayBuffer:
         # This deque parallels self._episodes and enables O(1) oldest episode access
         self._episode_order: deque[str] = deque()
 
+        # Track valid step counts for each episode in parallel with _episode_order
+        # This avoids O(num_episodes) scan during sampling by maintaining counts
+        # as episodes are added/extended/evicted
+        self._episode_valid_counts: deque[int] = deque()
+
     async def start_episode(
         self,
         agent_id: str,
@@ -251,6 +256,7 @@ class EpisodeReplayBuffer:
         self._episodes[episode_id] = episode
         self._episodes_by_agent[agent_id].append(episode_id)
         self._episode_order.append(episode_id)
+        self._episode_valid_counts.append(0)  # New episode starts with 0 valid steps
 
         # Check capacity and evict if needed
         await self._evict_if_needed()
@@ -310,6 +316,13 @@ class EpisodeReplayBuffer:
         episode.rewards.append(reward)
         self._total_steps += 1
 
+        # Update valid count for this episode
+        # After adding an action/reward, we need to check if a valid step was created
+        # A valid step requires both obs_t and obs_{t+1} to be available
+        new_valid_count = self._get_valid_step_count(episode)
+        episode_idx = self._episode_order.index(episode_id)
+        self._episode_valid_counts[episode_idx] = new_valid_count
+
         # Check step capacity
         await self._evict_if_needed()
 
@@ -358,6 +371,11 @@ class EpisodeReplayBuffer:
 
         # Update status using object.__setattr__ since Episode dataclass is frozen
         object.__setattr__(episode, "status", status)
+
+        # Update valid count for this episode (status change affects valid count)
+        new_valid_count = self._get_valid_step_count(episode)
+        episode_idx = self._episode_order.index(episode_id)
+        self._episode_valid_counts[episode_idx] = new_valid_count
 
     def _get_valid_step_count(self, episode: Episode) -> int:
         """Get the number of valid starting positions for sampling in an episode.
@@ -413,14 +431,12 @@ class EpisodeReplayBuffer:
         if not 0 < gamma <= 1:
             raise ValueError(f"gamma must be in (0, 1], got {gamma}")
 
-        # Build episode ranges using the deque for iteration order
-        # This avoids iterating over self._episodes.items() directly
+        # Build episode ranges using pre-computed valid counts from the deque
+        # This avoids O(num_episodes) scan to compute valid counts
         episode_ranges: list[tuple[int, int, str]] = []  # (start_pos, end_pos, episode_id)
         cumulative_pos = 0
 
-        for episode_id in self._episode_order:
-            episode = self._episodes[episode_id]
-            valid_count = self._get_valid_step_count(episode)
+        for episode_id, valid_count in zip(self._episode_order, self._episode_valid_counts, strict=True):
             if valid_count > 0:
                 episode_ranges.append((cumulative_pos, cumulative_pos + valid_count, episode_id))
                 cumulative_pos += valid_count
@@ -566,8 +582,10 @@ class EpisodeReplayBuffer:
             if not self._episodes_by_agent[agent_id]:
                 del self._episodes_by_agent[agent_id]
 
-        # Remove from episode order deque
+        # Remove from episode order deque and corresponding valid count
+        episode_idx = self._episode_order.index(episode_id)
         self._episode_order.remove(episode_id)
+        del self._episode_valid_counts[episode_idx]
 
     async def get_stats(self) -> dict[str, Any]:
         """Get statistics about the replay buffer.
@@ -591,4 +609,5 @@ class EpisodeReplayBuffer:
         self._episodes.clear()
         self._episodes_by_agent.clear()
         self._episode_order.clear()
+        self._episode_valid_counts.clear()
         self._total_steps = 0
