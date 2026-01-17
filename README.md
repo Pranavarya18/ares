@@ -1,3 +1,4 @@
+> 🚀 ARES is under active development. More features and examples coming soon.
 # ARES
 
 ARES (Agentic Research and Evaluation Suite) is an RL-first framework for training and evaluating agents.
@@ -94,3 +95,9 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+## Status
+
+- ✅ Local setup supported
+- 🚧 PyPI release coming soon
+- 🚧 More environments and agents in progress
+
