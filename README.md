@@ -1,4 +1,4 @@
-> 🚀 ARES is under active development. More features and examples coming soon.
+> 🚀 ARES is under active development. More features and examples coming soon
 # ARES
 
 ARES (Agentic Research and Evaluation Suite) is an RL-first framework for training and evaluating agents.
@@ -100,4 +100,11 @@ if __name__ == "__main__":
 - ✅ Local setup supported
 - 🚧 PyPI release coming soon
 - 🚧 More environments and agents in progress
+---
+
+## Notes
+
+- This project is under active development.
+- Documentation may evolve as features stabilize.
+
 
